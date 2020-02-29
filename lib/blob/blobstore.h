@@ -124,13 +124,18 @@ struct spdk_blob_list {
 };
 
 struct spdk_blob {
+	/* blobstore的运行时数据结构*/
 	struct spdk_blob_store *bs;
-
+	/* 打开引用计数*/
 	uint32_t	open_ref;
-
+	/* 
+	 * 该blob的id，从该id能够找到blob的首个元数据
+	 * 页的索引
+	 */
 	spdk_blob_id	id;
+	/* clone和snapshot使用，记录父blob的id*/
 	spdk_blob_id	parent_id;
-
+	/* blob的状态， dirty时表示需要刷新到物理块设备*/
 	enum spdk_blob_state		state;
 
 	/* Two copies of the mutable data. One is a version
@@ -138,23 +143,36 @@ struct spdk_blob {
 	 * The other (active) is the current data. Syncing
 	 * a blob makes the clean match the active.
 	 */
+	/*
+	 * Clean是底层物理设备上持久化的数据， active是blob
+	 * 中新更新过的数据，需要在适当时刻刷到底层物理设备，
+	 * 一旦刷到底层设备， active会重新赋值给clean。
+	 */
 	struct spdk_blob_mut_data	clean;
 	struct spdk_blob_mut_data	active;
 
 	bool		invalid;
 	bool		data_ro;
 	bool		md_ro;
-
+	/* 
+	 * blob对应的flags标志位，
+	 * 该标志位会持久化到blob的元数据页中
+	 */
 	uint64_t	invalid_flags;
 	uint64_t	data_ro_flags;
 	uint64_t	md_ro_flags;
-
+	/* 
+	 * 目前只有瘦分配会初始化该字段，
+	 * 该虚拟设备用作分配簇时的cow动作
+	 */
 	struct spdk_bs_dev *back_bs_dev;
 
 	/* TODO: The xattrs are mutable, but we don't want to be
 	 * copying them unnecessarily. Figure this out.
 	 */
+	 /* Blob 的 xattrs 属性 */
 	struct spdk_xattr_tailq xattrs;
+	/* blob的挂链项*/
 	struct spdk_xattr_tailq xattrs_internal;
 
 	TAILQ_ENTRY(spdk_blob) link;
@@ -172,36 +190,43 @@ struct spdk_blob {
 };
 
 struct spdk_blob_store {
+	/* blob元数据页的起始page偏移*/
 	uint64_t			md_start; /* Offset from beginning of disk, in pages */
+	/* blob元数据页的page数 */
 	uint32_t			md_len; /* Count, in pages */
 
 	struct spdk_io_channel		*md_channel;
 	uint32_t			max_channel_ops;
-
+	/* 元数据更新的线程，当前仅支持该线程持久化元数据 */
 	struct spdk_thread		*md_thread;
-
+	/* 连接blobstore和bdev的设备对象*/
 	struct spdk_bs_dev		*dev;
-
+	/* 三张位图，解释见super_block */
 	struct spdk_bit_array		*used_md_pages;
 	struct spdk_bit_array		*used_clusters;
 	struct spdk_bit_array		*used_blobids;
 
 	pthread_mutex_t			used_clusters_mutex;
-
+	/* 簇大小 */
 	uint32_t			cluster_sz;
+	/*簇数目*/
 	uint64_t			total_clusters;
+	/* 数据簇数目*/
 	uint64_t			total_data_clusters;
+	/*未分配簇数目*/
 	uint64_t			num_free_clusters;
+	/*一个簇对应的page数目*/
 	uint64_t			pages_per_cluster;
 	uint32_t			io_unit_size;
 
 	spdk_blob_id			super_blob;
 	struct spdk_bs_type		bstype;
-
+	/* unload blobstore后的回调*/
 	struct spdk_bs_cpl		unload_cpl;
 	int				unload_err;
-
+	/* blobstore中的blobs*/
 	TAILQ_HEAD(, spdk_blob)		blobs;
+	/*blobstore 中 的 snapshots*/
 	TAILQ_HEAD(, spdk_blob_list)	snapshots;
 
 	bool                            clean;
@@ -285,23 +310,34 @@ struct spdk_bs_md_mask {
  * serialized metadata chain for a blob. */
 #define SPDK_MD_DESCRIPTOR_TYPE_EXTENT_PAGE 6
 
+/** comment by hy 2020-02-13
+ * # blob的属性xattrs
+ */
 struct spdk_blob_md_descriptor_xattr {
 	uint8_t		type;
 	uint32_t	length;
 
 	uint16_t	name_length;
 	uint16_t	value_length;
-
+	/* 
+	 * name 对 应 key ， value 紧 跟 在 name 后 面 ，由
+	 * name_length和value_length指定key和value的长度和偏移量。
+	 */
 	char		name[0];
 	/* String name immediately followed by string value. */
 };
 
+/** comment by hy 2020-02-13
+ * # blob的簇extents
+ */
 struct spdk_blob_md_descriptor_extent_rle {
 	uint8_t		type;
 	uint32_t	length;
 
 	struct {
+		/* 其实簇的lba地址 */
 		uint32_t        cluster_idx;
+		/* In units of clusters 该extents对应的簇数目 */
 		uint32_t        length; /* In units of clusters */
 	} extents[0];
 };
@@ -341,6 +377,9 @@ struct spdk_blob_md_descriptor_extent_page {
 #define SPDK_BLOB_CLEAR_METHOD (3ULL << SPDK_BLOB_CLEAR_METHOD_SHIFT)
 #define SPDK_BLOB_MD_RO_FLAGS_MASK	SPDK_BLOB_CLEAR_METHOD
 
+/** comment by hy 2020-02-13
+ * # blob 的 flags 标志位
+ */
 struct spdk_blob_md_descriptor_flags {
 	uint8_t		type;
 	uint32_t	length;
@@ -349,6 +388,7 @@ struct spdk_blob_md_descriptor_flags {
 	 * If a flag in invalid_flags is set that the application is not aware of,
 	 *  it will not allow the blob to be opened.
 	 */
+	 /* blob的三个读写标志位 */
 	uint64_t	invalid_flags;
 
 	/*
@@ -373,14 +413,28 @@ struct spdk_blob_md_descriptor {
 
 struct spdk_blob_md_page {
 	spdk_blob_id     id;
-
+	/*该blob元数据页的序列号*/
 	uint32_t        sequence_num;
+	/* 保留字节*/
 	uint32_t	reserved0;
 
 	/* Descriptors here */
+	/* 
+	 * 该数组实际序列化了blob三类元数据：
+	 * flags标志位、 blob属性（xattrs）、 blob
+	 * 的extents，最终会持久化到物理块设备上。
+	*/
 	uint8_t		descriptors[4072];
 
+	/* 
+	 * 下一个该blob元数据页的page索引号，转换为lba后，
+	 * 可以递归读取下一个blob元数据页，例如：
+	 * next_page = page->next;
+	 * next_lba = _spdk_bs_page_to_lba(blob->bs, 
+	 * blob->bs->md_start +next_page);
+	*/
 	uint32_t	next;
+	/* 以上数据的crc校验码 */
 	uint32_t	crc;
 };
 #define SPDK_BS_PAGE_SIZE 0x1000
@@ -396,32 +450,74 @@ SPDK_STATIC_ASSERT(SPDK_BS_PAGE_SIZE == sizeof(struct spdk_blob_md_page), "Inval
 #define SPDK_BS_SUPER_BLOCK_SIG "SPDKBLOB"
 
 struct spdk_bs_super_block {
+	/*8个字节的签名，固定为SPDKBLOB */
 	uint8_t		signature[8];
+	/*blobstore的版本，目前是3 */
 	uint32_t        version;
+	/* 整个super_blob的长度，目前固定是4KB */
 	uint32_t        length;
 	uint32_t	clean; /* If there was a clean shutdown, this is 1. */
+	/* 
+	 * super_blob 对应的id 
+	 * 该字段只有正常关闭blobstore时为1，否则为0：
+	 * 这意味着每次打开blobstore时，都需要把该字段的物化值更新为0。如果打
+	 * 开blobstore时读取该值不为1，则blobstore会进入一种recovery修复模式，
+	 * 尝试修复blobstore的不一致数据， 具体见代码实现。
+	 */
 	spdk_blob_id	super_blob;
-
+	/* 
+	 * blobstore的簇大小，创建blobstore时指定，
+	 * 不指定默认为4MB
+	 */
 	uint32_t	cluster_size; /* In bytes */
-
+	/*
+	 * 记录blob元数据页分配的位图数组存储在物理块设备上的page偏移量
+	 * 由于第 0 个 page 是 super_block，
+	 * 那么 used_page_mask_start 恒为 1
+	 */
 	uint32_t	used_page_mask_start; /* Offset from beginning of disk, in pages */
+	/* 
+	 * 元数据页分配占用的page数
+	 * divide_round_up(sizeof(struct spdk_bs_md_mask) +
+	 * divide_round_up(bs->md_len, 8), SPDK_BS_PAGE_SIZE)
+	 */
 	uint32_t	used_page_mask_len; /* Count, in pages */
+	/* 
+	 * 记录簇分配的位图数组存储在物理块设备上的page偏移量
+	 */
 
 	uint32_t	used_cluster_mask_start; /* Offset from beginning of disk, in pages */
+	/* 
+	 * 簇分配位数组占用的page数
+	 */
 	uint32_t	used_cluster_mask_len; /* Count, in pages */
-
+	/* 
+	 * blob元数据页在物理块设备上的起始page偏移量
+	 * 位图数组一旦分配完，就得到了 blob 元数据页的起始 page
+	 */
 	uint32_t	md_start; /* Offset from beginning of disk, in pages */
+	/* 
+	 * blob元数据占用的page数
+	 * 元 数 据 使 用 的 簇 数 量 divide_round_up(num_md_pages,
+	 * bs->pages_per_cluster) = divide_round_up(381583, 4MB / 4KB)
+	 */
 	uint32_t	md_len; /* Count, in pages */
-
+	/* blobstore类型 */
 	struct spdk_bs_type	bstype; /* blobstore type */
-
+	/* 
+	 * 元数据按照占用的 page 数量进行簇整数边界对齐后,剩下的就是数据
+	 * 数据簇,创建 blob 时分配给 blob（瘦分配在写入时才进行分配）。
+	 * 分配数据簇时要修改位图数组，因此位图数组需要及时刷到物理块设备上
+	 */
 	uint32_t	used_blobid_mask_start; /* Offset from beginning of disk, in pages */
+	/* blobid分配位数组占用的page数 */
 	uint32_t	used_blobid_mask_len; /* Count, in pages */
 
 	uint64_t        size; /* size of blobstore in bytes */
 	uint32_t        io_unit_size; /* Size of io unit in bytes */
-
+	/* 保留字节 */
 	uint8_t         reserved[4000];
+	/* crc校验码 */
 	uint32_t	crc;
 };
 SPDK_STATIC_ASSERT(sizeof(struct spdk_bs_super_block) == 0x1000, "Invalid super block size");
